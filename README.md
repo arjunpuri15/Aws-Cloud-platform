@@ -15,6 +15,7 @@ Internet
           (us-east-1a)            (us-east-1b)
                    \                  /
                 [ NAT Gateway -> Internet (outbound only) ]
+                ```
                 **Network design:**
 - A custom **VPC** (`10.0.0.0/16`) with DNS support enabled
 - **Two public subnets** and **two private subnets**, spread across two Availability Zones for high availability
