@@ -141,3 +141,142 @@ resource "aws_security_group" "web" {
 
   tags = { Name = "web-sg" }
 }
+# ==================== PHASE 2: Compute + Load Balancer ====================
+
+# Find the latest Amazon Linux 2023 image
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+}
+
+# Security group for the load balancer (faces the internet)
+resource "aws_security_group" "alb" {
+  name        = "alb-sg"
+  description = "Allow HTTP from the internet"
+  vpc_id      = aws_vpc.main.id
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "alb-sg" }
+}
+
+# Security group for app servers (only the ALB can reach them)
+resource "aws_security_group" "app" {
+  name        = "app-sg"
+  description = "Allow HTTP from the ALB only"
+  vpc_id      = aws_vpc.main.id
+  ingress {
+    description     = "HTTP from ALB"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = { Name = "app-sg" }
+}
+
+# App server in private subnet A
+resource "aws_instance" "app_a" {
+  ami                    = data.aws_ami.al2023.id
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.private_a.id
+  vpc_security_group_ids = [aws_security_group.app.id]
+  user_data = <<-EOF
+    #!/bin/bash
+    dnf -y install httpd
+    systemctl enable --now httpd
+    echo "<h1>Hello from app server A - $(hostname -f)</h1>" > /var/www/html/index.html
+  EOF
+  tags = { Name = "app-server-a" }
+}
+
+# App server in private subnet B
+resource "aws_instance" "app_b" {
+  ami                    = data.aws_ami.al2023.id
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.private_b.id
+  vpc_security_group_ids = [aws_security_group.app.id]
+  user_data = <<-EOF
+    #!/bin/bash
+    dnf -y install httpd
+    systemctl enable --now httpd
+    echo "<h1>Hello from app server B - $(hostname -f)</h1>" > /var/www/html/index.html
+  EOF
+  tags = { Name = "app-server-b" }
+}
+
+# The Application Load Balancer (lives in the public subnets)
+resource "aws_lb" "main" {
+  name               = "capstone-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+  tags = { Name = "capstone-alb" }
+}
+
+# Target group (the pool of servers the ALB sends traffic to)
+resource "aws_lb_target_group" "main" {
+  name     = "capstone-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+  health_check {
+    path                = "/"
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+    interval            = 10
+  }
+  tags = { Name = "capstone-tg" }
+}
+
+# Register both servers with the target group
+resource "aws_lb_target_group_attachment" "app_a" {
+  target_group_arn = aws_lb_target_group.main.arn
+  target_id        = aws_instance.app_a.id
+  port             = 80
+}
+
+resource "aws_lb_target_group_attachment" "app_b" {
+  target_group_arn = aws_lb_target_group.main.arn
+  target_id        = aws_instance.app_b.id
+  port             = 80
+}
+
+# Listener (tells the ALB to forward port 80 traffic to the target group)
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 80
+  protocol          = "HTTP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.main.arn
+  }
+}
+
+# Print the URL to visit
+output "alb_url" {
+  value       = "http://${aws_lb.main.dns_name}"
+  description = "Open this in your browser"
+}
